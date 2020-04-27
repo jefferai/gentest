@@ -34,6 +34,7 @@ func main() {
 
 	var errFound bool
 
+	elideList := []int{}
 	ast.Walk(visitFn(func(n ast.Node) {
 		spec, ok := n.(*ast.TypeSpec)
 		if !ok {
@@ -58,9 +59,13 @@ func main() {
 			fmt.Printf("no fields found in %q\n", inName)
 			return
 		}
-		for _, field := range st.Fields.List {
+		for i, field := range st.Fields.List {
 			var found bool
 			for _, name := range field.Names {
+				if !name.IsExported() && name.Name != "fieldMask" {
+					elideList = append(elideList, i)
+					continue
+				}
 				if name.Name != "fieldMask" {
 					found = true
 					break
@@ -69,15 +74,20 @@ func main() {
 			if !found {
 				continue
 			}
-			typ, ok := field.Type.(*ast.Ident)
-			if !ok {
-				errFound = true
-				fmt.Printf("expected ident type for field, got %t\n", field.Type)
-				return
-			}
-			typ.Name = "*" + typ.Name
+			/*
+				typ, ok := field.Type.(*ast.Ident)
+				if !ok {
+					errFound = true
+					fmt.Printf("expected ident type for field, got %t\n", field.Type)
+					return
+				}
+				typ.Name = "*" + typ.Name
+			*/
 		}
 	}), inAst)
+
+	fmt.Println(elideList)
+	return
 
 	if errFound {
 		os.Exit(1)
