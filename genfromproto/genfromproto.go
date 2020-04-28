@@ -8,7 +8,10 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"regexp"
 )
+
+var regex = regexp.MustCompile(`(json:".*")`)
 
 type visitFn func(node ast.Node)
 
@@ -34,7 +37,6 @@ func main() {
 
 	var errFound bool
 
-	elideList := []int{}
 	ast.Walk(visitFn(func(n ast.Node) {
 		spec, ok := n.(*ast.TypeSpec)
 		if !ok {
@@ -59,35 +61,108 @@ func main() {
 			fmt.Printf("no fields found in %q\n", inName)
 			return
 		}
-		for i, field := range st.Fields.List {
-			var found bool
-			for _, name := range field.Names {
-				if !name.IsExported() && name.Name != "fieldMask" {
-					elideList = append(elideList, i)
-					continue
-				}
-				if name.Name != "fieldMask" {
-					found = true
-					break
-				}
+		var elideList []int
+		defer func() {
+			var cutCount int
+			for _, val := range elideList {
+				loc := val - cutCount
+				st.Fields.List = append(st.Fields.List[:loc], st.Fields.List[loc+1:]...)
+				cutCount++
 			}
-			if !found {
+		}()
+
+		for i, field := range st.Fields.List {
+			if !field.Names[0].IsExported() {
+				elideList = append(elideList, i)
 				continue
 			}
-			/*
-				typ, ok := field.Type.(*ast.Ident)
-				if !ok {
-					errFound = true
-					fmt.Printf("expected ident type for field, got %t\n", field.Type)
-					return
-				}
+
+			// Anything that isn't a basic type we expect to be a star
+			// expression with a selector; that is, a wrapper value, timestamp
+			// value, etc.
+			//
+			// TODO: this isn't necessarily a good assumption, which means we
+			// might get failures with other types. This is an internal tools
+			// only; we can revisit as needed!
+			var selectorExpr *ast.SelectorExpr
+			switch typ := field.Type.(type) {
+			case *ast.Ident:
 				typ.Name = "*" + typ.Name
-			*/
+				goto TAGMODIFY
+			case *ast.StarExpr:
+				switch nextTyp := typ.X.(type) {
+				case *ast.Ident:
+					// Already a pointer, don't do anything
+					goto TAGMODIFY
+				case *ast.SelectorExpr:
+					selectorExpr = nextTyp
+				}
+			case *ast.SelectorExpr:
+				selectorExpr = typ
+			}
+
+			switch {
+			case selectorExpr != nil:
+				xident, ok := selectorExpr.X.(*ast.Ident)
+				if !ok {
+					fmt.Printf("unexpected non-ident type in selector\n")
+					os.Exit(1)
+				}
+
+				switch xident.Name {
+				case "wrappers":
+					switch selectorExpr.Sel.Name {
+					case "StringValue":
+						st.Fields.List[i] = &ast.Field{
+							Names: field.Names,
+							Type: &ast.Ident{
+								Name: "*string",
+							},
+							Tag: field.Tag,
+						}
+					case "BoolValue":
+						st.Fields.List[i] = &ast.Field{
+							Names: field.Names,
+							Type: &ast.Ident{
+								Name: "*bool",
+							},
+							Tag: field.Tag,
+						}
+					default:
+						fmt.Printf("unhandled wrappers selector sel name %q\n", selectorExpr.Sel.Name)
+						os.Exit(1)
+					}
+
+				case "timestamp":
+					switch selectorExpr.Sel.Name {
+					case "Timestamp":
+						st.Fields.List[i] = &ast.Field{
+							Names: field.Names,
+							Type: &ast.Ident{
+								Name: "time.Time",
+							},
+							Tag: field.Tag,
+						}
+
+					default:
+						fmt.Printf("unhandled timestamp selector sel name %q\n", selectorExpr.Sel.Name)
+						os.Exit(1)
+					}
+
+				default:
+					fmt.Printf("unhandled xident name %q\n", xident.Name)
+					os.Exit(1)
+				}
+
+			default:
+				fmt.Println("unhandled non-ident, non-selector case")
+				os.Exit(1)
+			}
+
+		TAGMODIFY:
+			st.Fields.List[i].Tag.Value = "`" + regex.FindString(st.Fields.List[i].Tag.Value) + "`"
 		}
 	}), inAst)
-
-	fmt.Println(elideList)
-	return
 
 	if errFound {
 		os.Exit(1)
